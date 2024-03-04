@@ -2,8 +2,10 @@
 
 //! Demonstrate creating a transaction that spends to and from p2tr outputs.
 use bitcoin::consensus::Encodable;
+use bitcoin::psbt::raw::Key;
 use hex::DisplayHex;
 use std::fmt::UpperHex;
+use std::io::Write;
 use std::str::FromStr;
 
 use bitcoin::hashes::Hash;
@@ -12,8 +14,8 @@ use bitcoin::locktime::absolute;
 use bitcoin::secp256k1::{rand, Message, Secp256k1, SecretKey, Signing, Verification};
 use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
 use bitcoin::{
-    transaction, Address, Amount, KnownHrp, Network, OutPoint, ScriptBuf, Sequence, Transaction,
-    TxIn, TxOut, Txid, Witness, WitnessProgram,
+    transaction, Address, Amount, KnownHrp, Network, OutPoint, ScriptBuf, Sequence, TapSighash,
+    Transaction, TxIn, TxOut, Txid, Witness, WitnessProgram,
 };
 use bitcoin::{CompressedPublicKey, NetworkKind};
 use hex_lit::hex;
@@ -118,8 +120,6 @@ fn main() {
     } else {
         if USE_ALT_SCHNORR_SIGNING {
             println!("signing using k256 schnorr implementation, not prehashed.");
-            use k256::ecdsa::signature::hazmat::PrehashSigner;
-            use k256::ecdsa::signature::Signer;
 
             // encode without pre-hashing, safe to use with remote signer.
             let mut signing_base = Vec::<u8>::new();
@@ -134,10 +134,8 @@ fn main() {
                 )
                 .expect("encode taproot tx");
             println!("signing_base: {}", signing_base.as_hex());
-
-            let secret_bytes = keypair.secret_bytes();
-            let schnorr_key = k256::schnorr::SigningKey::from_bytes(&secret_bytes).unwrap();
-            let mut sig_bytes = schnorr_key.sign(&signing_base).to_bytes();
+            // pass key handle + signing base to remote signer
+            let sig_bytes = remote_sign(&keypair, &signing_base);
 
             bitcoin::secp256k1::schnorr::Signature::from_slice(&sig_bytes).unwrap()
         } else {
@@ -160,12 +158,27 @@ fn main() {
     // BOOM! Transaction signed and ready to broadcast.
     let mut buffer = Vec::<u8>::new();
     // println!("{:#?}", tx);
-    tx.consensus_encode(&mut buffer);
+    tx.consensus_encode(&mut buffer).unwrap();
     // can decode on: https://live.blockcypher.com/btc/decodetx/
     println!("btc tx hex:\n{}", buffer.as_hex());
 
     // try to broadcast by copying and pasting to:
     // https://mempool.space/tx/push
+}
+
+// Mock for a remote signer
+fn remote_sign(keypair: &Keypair, payload: &Vec<u8>) -> Vec<u8> {
+    use k256::ecdsa::signature::hazmat::PrehashSigner;
+    use k256::ecdsa::signature::Signer;
+
+    // the remote signer should support this hash natively.
+    let mut enc = TapSighash::engine();
+    enc.write_all(&payload);
+    let digest = TapSighash::from_engine(enc).as_byte_array().clone();
+
+    let secret_bytes = keypair.secret_bytes();
+    let schnorr_key = k256::schnorr::SigningKey::from_bytes(&secret_bytes).unwrap();
+    schnorr_key.sign_prehash(&digest).unwrap().to_bytes().to_vec()
 }
 
 /// An example of keys controlled by the transaction sender.
