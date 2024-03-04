@@ -20,9 +20,10 @@ use hex_lit::hex;
 
 // the utxo to spend must be correct
 const UTXO_TX_HASH: &'static str =
-    "57ad03cff42a4510393dbac7d6d7755271f5b969f32f82e233b4228ec435f5a3";
+    "84d0cb3070d7b673028bb24a946ef68f9333d6617b33f4377c0d436f848c22f0";
+const UTXO_INDEX: u32 = 1;
 // the utxo amount must be correct or will get invalid sig
-const DUMMY_UTXO_AMOUNT: Amount = Amount::from_sat(30_000);
+const DUMMY_UTXO_AMOUNT: Amount = Amount::from_sat(20000);
 
 const SPEND_AMOUNT: Amount = Amount::from_sat(3_000); // the amount to transfer to destination
 
@@ -32,6 +33,9 @@ const FEE_SATS: u64 = 1000;
 // use the tweaked address + secret key or with no tweak at all
 // TWEAK should _not_ be used with remove signers or MPC integrations.
 const USE_TWEAK: bool = false;
+// Use alternative signing algorithm used by MPC signer.
+// Both signer types should work / have the same implementation.
+const USE_ALT_SCHNORR_SIGNING: bool = true;
 
 fn main() {
     let secp = Secp256k1::new();
@@ -114,7 +118,21 @@ fn main() {
         let tweaked: TweakedKeypair = keypair.tap_tweak(&secp, None);
         secp.sign_schnorr(&msg, &tweaked.to_inner())
     } else {
-        secp.sign_schnorr(&msg, &keypair)
+        if USE_ALT_SCHNORR_SIGNING {
+            println!("signing using k256 schnorr implementation");
+            use k256::ecdsa::signature::hazmat::PrehashSigner;
+            use k256::ecdsa::signature::DigestSigner;
+            use k256::ecdsa::signature::Signer;
+            let secret_bytes = keypair.secret_bytes();
+            let schnorr_key = k256::schnorr::SigningKey::from_bytes(&secret_bytes).unwrap();
+            let mut sig_bytes =
+                schnorr_key.sign_prehash(&sighash.to_byte_array()).unwrap().to_bytes();
+
+            bitcoin::secp256k1::schnorr::Signature::from_slice(&sig_bytes).unwrap()
+        } else {
+            println!("signing using rust-bitcoin schnorr implementation");
+            secp.sign_schnorr(&msg, &keypair)
+        }
     };
 
     // Update the witness stack.
@@ -176,7 +194,7 @@ fn dummy_unspent_transaction_output<C: Verification>(
         ScriptBuf::new_p2tr_tweaked(internal_key.dangerous_assume_tweaked())
     };
 
-    let out_point = OutPoint { txid: Txid::from_str(UTXO_TX_HASH).unwrap(), vout: 0 };
+    let out_point = OutPoint { txid: Txid::from_str(UTXO_TX_HASH).unwrap(), vout: UTXO_INDEX };
 
     let utxo = TxOut { value: DUMMY_UTXO_AMOUNT, script_pubkey };
 
