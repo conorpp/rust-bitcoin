@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! Demonstrate creating a transaction that spends to and from p2tr outputs.
-
+use bitcoin::consensus::Encodable;
+use hex::DisplayHex;
+use std::fmt::UpperHex;
 use std::str::FromStr;
 
 use bitcoin::hashes::Hash;
@@ -10,19 +12,51 @@ use bitcoin::locktime::absolute;
 use bitcoin::secp256k1::{rand, Message, Secp256k1, SecretKey, Signing, Verification};
 use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
 use bitcoin::{
-    transaction, Address, Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
-    Txid, Witness,
+    transaction, Address, Amount, KnownHrp, Network, OutPoint, ScriptBuf, Sequence, Transaction,
+    TxIn, TxOut, Txid, Witness, WitnessProgram,
 };
+use bitcoin::{CompressedPublicKey, NetworkKind};
+use hex_lit::hex;
 
-const DUMMY_UTXO_AMOUNT: Amount = Amount::from_sat(20_000_000);
-const SPEND_AMOUNT: Amount = Amount::from_sat(5_000_000);
-const CHANGE_AMOUNT: Amount = Amount::from_sat(14_999_000); // 1000 sat fee.
+// the utxo to spend must be correct
+const UTXO_TX_HASH: &'static str =
+    "57ad03cff42a4510393dbac7d6d7755271f5b969f32f82e233b4228ec435f5a3";
+// the utxo amount must be correct or will get invalid sig
+const DUMMY_UTXO_AMOUNT: Amount = Amount::from_sat(30_000);
+
+const SPEND_AMOUNT: Amount = Amount::from_sat(3_000); // the amount to transfer to destination
+
+// sats to spend on transaction
+const FEE_SATS: u64 = 1000;
+
+// use the tweaked address + secret key or with no tweak at all
+// TWEAK should _not_ be used with remove signers or MPC integrations.
+const USE_TWEAK: bool = false;
 
 fn main() {
     let secp = Secp256k1::new();
 
     // Get a keypair we control. In a real application these would come from a stored secret.
     let keypair = senders_keys(&secp);
+
+    let public_key = keypair.public_key();
+    // let sender_address_ref = Address::p2wpkh(&CompressedPublicKey(public_key), KnownHrp::Mainnet);
+    // println!("normal segwit address: {}", sender_address_ref);
+    let sender_address_ref = if USE_TWEAK {
+        Address::from_witness_program(
+            WitnessProgram::p2tr(&secp, public_key.into(), None),
+            // WitnessProgram::new_p2tr(public_key_raw),
+            KnownHrp::Mainnet,
+        )
+    } else {
+        let mut public_key_raw = [0u8; 32];
+        let public_key_serialized = keypair.public_key().serialize();
+        public_key_raw.clone_from_slice(&public_key_serialized[1..]);
+        Address::from_witness_program(WitnessProgram::new_p2tr(public_key_raw), KnownHrp::Mainnet)
+    };
+
+    println!("sender taproot address: {} (tweaked={})", sender_address_ref, USE_TWEAK);
+
     let (internal_key, _parity) = keypair.x_only_public_key();
 
     // Get an unspent output that is locked to the key above that we control.
@@ -44,8 +78,12 @@ fn main() {
     let spend = TxOut { value: SPEND_AMOUNT, script_pubkey: address.script_pubkey() };
 
     // The change output is locked to a key controlled by us.
+    let change_amount: Amount = Amount::from_sat(
+        // 1000 sat fee.
+        DUMMY_UTXO_AMOUNT.to_sat() - SPEND_AMOUNT.to_sat() - FEE_SATS,
+    );
     let change = TxOut {
-        value: CHANGE_AMOUNT,
+        value: change_amount,
         script_pubkey: ScriptBuf::new_p2tr(&secp, internal_key, None), // Change comes back to us.
     };
 
@@ -70,9 +108,14 @@ fn main() {
         .expect("failed to construct sighash");
 
     // Sign the sighash using the secp256k1 library (exported by rust-bitcoin).
-    let tweaked: TweakedKeypair = keypair.tap_tweak(&secp, None);
     let msg = Message::from_digest(sighash.to_byte_array());
-    let signature = secp.sign_schnorr(&msg, &tweaked.to_inner());
+
+    let signature = if USE_TWEAK {
+        let tweaked: TweakedKeypair = keypair.tap_tweak(&secp, None);
+        secp.sign_schnorr(&msg, &tweaked.to_inner())
+    } else {
+        secp.sign_schnorr(&msg, &keypair)
+    };
 
     // Update the witness stack.
     let signature = bitcoin::taproot::Signature { signature, sighash_type };
@@ -82,14 +125,23 @@ fn main() {
     let tx = sighasher.into_transaction();
 
     // BOOM! Transaction signed and ready to broadcast.
-    println!("{:#?}", tx);
+    let mut buffer = Vec::<u8>::new();
+    // println!("{:#?}", tx);
+    tx.consensus_encode(&mut buffer);
+    // can decode on: https://live.blockcypher.com/btc/decodetx/
+    println!("btc tx hex:\n{}", buffer.as_hex());
+
+    // try to broadcast by copying and pasting to:
+    // https://mempool.space/tx/push
 }
 
 /// An example of keys controlled by the transaction sender.
 ///
 /// In a real application these would be actual secrets.
 fn senders_keys<C: Signing>(secp: &Secp256k1<C>) -> Keypair {
-    let sk = SecretKey::new(&mut rand::thread_rng());
+    let sk_hex = std::env::var("MAINNET_PRIVATE_KEY")
+        .expect("must set 32 byte hex in variable: MAINNET_PRIVATE_KEY");
+    let sk = SecretKey::from_str(&sk_hex).unwrap();
     Keypair::from_secret_key(secp, &sk)
 }
 
@@ -99,7 +151,7 @@ fn senders_keys<C: Signing>(secp: &Secp256k1<C>) -> Keypair {
 ///
 /// (FWIW this is an arbitrary mainnet address from block 805222.)
 fn receivers_address() -> Address {
-    Address::from_str("bc1p0dq0tzg2r780hldthn5mrznmpxsxc0jux5f20fwj0z3wqxxk6fpqm7q0va")
+    Address::from_str("bc1p8gsj9wp5qsdjduvfe5trq34tr9n8720kw6r4ytw9pds6xra640tqqup53c")
         .expect("a valid address")
         .require_network(Network::Bitcoin)
         .expect("valid address for mainnet")
@@ -117,12 +169,14 @@ fn dummy_unspent_transaction_output<C: Verification>(
     secp: &Secp256k1<C>,
     internal_key: UntweakedPublicKey,
 ) -> (OutPoint, TxOut) {
-    let script_pubkey = ScriptBuf::new_p2tr(secp, internal_key, None);
-
-    let out_point = OutPoint {
-        txid: Txid::all_zeros(), // Obviously invalid.
-        vout: 0,
+    let script_pubkey = if USE_TWEAK {
+        ScriptBuf::new_p2tr(secp, internal_key, None)
+    } else {
+        // assume the public key is already 'tweaked'
+        ScriptBuf::new_p2tr_tweaked(internal_key.dangerous_assume_tweaked())
     };
+
+    let out_point = OutPoint { txid: Txid::from_str(UTXO_TX_HASH).unwrap(), vout: 0 };
 
     let utxo = TxOut { value: DUMMY_UTXO_AMOUNT, script_pubkey };
 
