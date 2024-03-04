@@ -20,10 +20,10 @@ use hex_lit::hex;
 
 // the utxo to spend must be correct
 const UTXO_TX_HASH: &'static str =
-    "84d0cb3070d7b673028bb24a946ef68f9333d6617b33f4377c0d436f848c22f0";
+    "4c5cadc061e201a2a9b02d4bf67dbb1251c9cf7c43ab1d63c27472b5980cf86f";
 const UTXO_INDEX: u32 = 1;
 // the utxo amount must be correct or will get invalid sig
-const DUMMY_UTXO_AMOUNT: Amount = Amount::from_sat(20000);
+const DUMMY_UTXO_AMOUNT: Amount = Amount::from_sat(21000);
 
 const SPEND_AMOUNT: Amount = Amount::from_sat(3_000); // the amount to transfer to destination
 
@@ -105,32 +105,47 @@ fn main() {
     let sighash_type = TapSighashType::Default;
     let prevouts = vec![dummy_utxo];
     let prevouts = Prevouts::All(&prevouts);
-
     let mut sighasher = SighashCache::new(&mut unsigned_tx);
-    let sighash = sighasher
-        .taproot_key_spend_signature_hash(input_index, &prevouts, sighash_type)
-        .expect("failed to construct sighash");
-
-    // Sign the sighash using the secp256k1 library (exported by rust-bitcoin).
-    let msg = Message::from_digest(sighash.to_byte_array());
 
     let signature = if USE_TWEAK {
+        let sighash = sighasher
+            .taproot_key_spend_signature_hash(input_index, &prevouts, sighash_type)
+            .expect("failed to construct sighash");
+        let msg = Message::from_digest(sighash.to_byte_array());
+
         let tweaked: TweakedKeypair = keypair.tap_tweak(&secp, None);
         secp.sign_schnorr(&msg, &tweaked.to_inner())
     } else {
         if USE_ALT_SCHNORR_SIGNING {
-            println!("signing using k256 schnorr implementation");
+            println!("signing using k256 schnorr implementation, not prehashed.");
             use k256::ecdsa::signature::hazmat::PrehashSigner;
-            use k256::ecdsa::signature::DigestSigner;
             use k256::ecdsa::signature::Signer;
+
+            // encode without pre-hashing, safe to use with remote signer.
+            let mut signing_base = Vec::<u8>::new();
+            sighasher
+                .taproot_encode_signing_data_to(
+                    &mut signing_base,
+                    input_index,
+                    &prevouts,
+                    None,
+                    None,
+                    sighash_type,
+                )
+                .expect("encode taproot tx");
+            println!("signing_base: {}", signing_base.as_hex());
+
             let secret_bytes = keypair.secret_bytes();
             let schnorr_key = k256::schnorr::SigningKey::from_bytes(&secret_bytes).unwrap();
-            let mut sig_bytes =
-                schnorr_key.sign_prehash(&sighash.to_byte_array()).unwrap().to_bytes();
+            let mut sig_bytes = schnorr_key.sign(&signing_base).to_bytes();
 
             bitcoin::secp256k1::schnorr::Signature::from_slice(&sig_bytes).unwrap()
         } else {
-            println!("signing using rust-bitcoin schnorr implementation");
+            println!("signing using rust-bitcoin schnorr implementation. this is unsafe to use with remote signer due to pre-hashing.");
+            let sighash = sighasher
+                .taproot_key_spend_signature_hash(input_index, &prevouts, sighash_type)
+                .expect("failed to construct sighash");
+            let msg = Message::from_digest(sighash.to_byte_array());
             secp.sign_schnorr(&msg, &keypair)
         }
     };
