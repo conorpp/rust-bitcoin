@@ -67,7 +67,7 @@ impl WitnessProgram {
     }
 
     /// Creates a [`WitnessProgram`] from a 32 byte serialize taproot xonly pubkey.
-    fn new_p2tr(program: [u8; 32]) -> Self {
+    pub fn new_p2tr(program: [u8; 32]) -> Self {
         WitnessProgram { version: WitnessVersion::V1, program: ArrayVec::from_slice(&program) }
     }
 
@@ -101,7 +101,9 @@ impl WitnessProgram {
     }
 
     /// Returns the witness program version.
-    pub fn version(&self) -> WitnessVersion { self.version }
+    pub fn version(&self) -> WitnessVersion {
+        self.version
+    }
 
     /// Returns the witness program.
     pub fn program(&self) -> &PushBytes {
@@ -122,7 +124,9 @@ impl WitnessProgram {
     }
 
     /// Returns true if this witness program is for a P2TR output.
-    pub fn is_p2tr(&self) -> bool { self.version == WitnessVersion::V1 && self.program.len() == 32 }
+    pub fn is_p2tr(&self) -> bool {
+        self.version == WitnessVersion::V1 && self.program.len() == 32
+    }
 }
 
 /// Witness program error.
@@ -140,10 +144,12 @@ impl fmt::Display for Error {
         use Error::*;
 
         match *self {
-            InvalidLength(len) =>
-                write!(f, "witness program must be between 2 and 40 bytes: length={}", len),
-            InvalidSegwitV0Length(len) =>
-                write!(f, "a v0 witness program must be either 20 or 32 bytes: length={}", len),
+            InvalidLength(len) => {
+                write!(f, "witness program must be between 2 and 40 bytes: length={}", len)
+            }
+            InvalidSegwitV0Length(len) => {
+                write!(f, "a v0 witness program must be either 20 or 32 bytes: length={}", len)
+            }
         }
     }
 }
