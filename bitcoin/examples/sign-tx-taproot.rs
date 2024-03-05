@@ -2,30 +2,26 @@
 
 //! Demonstrate creating a transaction that spends to and from p2tr outputs.
 use bitcoin::consensus::Encodable;
-use bitcoin::psbt::raw::Key;
 use hex::DisplayHex;
-use std::fmt::UpperHex;
-use std::io::Write;
+use sha2::Digest;
 use std::str::FromStr;
 
 use bitcoin::hashes::Hash;
 use bitcoin::key::{Keypair, TapTweak, TweakedKeypair, UntweakedPublicKey};
 use bitcoin::locktime::absolute;
-use bitcoin::secp256k1::{rand, Message, Secp256k1, SecretKey, Signing, Verification};
+use bitcoin::secp256k1::{Message, Secp256k1, SecretKey, Signing, Verification};
 use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
 use bitcoin::{
-    transaction, Address, Amount, KnownHrp, Network, OutPoint, ScriptBuf, Sequence, TapSighash,
-    Transaction, TxIn, TxOut, Txid, Witness, WitnessProgram,
+    transaction, Address, Amount, KnownHrp, Network, OutPoint, ScriptBuf, Sequence, Transaction,
+    TxIn, TxOut, Txid, Witness, WitnessProgram,
 };
-use bitcoin::{CompressedPublicKey, NetworkKind};
-use hex_lit::hex;
 
 // the utxo to spend must be correct
 const UTXO_TX_HASH: &'static str =
-    "4c5cadc061e201a2a9b02d4bf67dbb1251c9cf7c43ab1d63c27472b5980cf86f";
+    "f2a992a90be0fa16a9268e4be91811ab662ddd9c3396ec5708251934e189f4bd";
 const UTXO_INDEX: u32 = 1;
 // the utxo amount must be correct or will get invalid sig
-const DUMMY_UTXO_AMOUNT: Amount = Amount::from_sat(21000);
+const DUMMY_UTXO_AMOUNT: Amount = Amount::from_sat(22000);
 
 const SPEND_AMOUNT: Amount = Amount::from_sat(3_000); // the amount to transfer to destination
 
@@ -133,9 +129,20 @@ fn main() {
                     sighash_type,
                 )
                 .expect("encode taproot tx");
-            println!("signing_base: {}", signing_base.as_hex());
+
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(b"TapSighash");
+            let tag_hash = hasher.finalize().to_vec();
+
+            // The taproot signing body is Sha256("TapSighash") || Sha256("TapSighash") || x
+            let mut prefixed_signing_base = Vec::<u8>::new();
+            prefixed_signing_base.extend(&tag_hash);
+            prefixed_signing_base.extend(&tag_hash);
+            prefixed_signing_base.extend(&signing_base);
+
+            println!("signing_base: {}", prefixed_signing_base.as_hex());
             // pass key handle + signing base to remote signer
-            let sig_bytes = remote_sign(&keypair, &signing_base);
+            let sig_bytes = remote_sign(&keypair, &prefixed_signing_base);
 
             bitcoin::secp256k1::schnorr::Signature::from_slice(&sig_bytes).unwrap()
         } else {
@@ -168,17 +175,10 @@ fn main() {
 
 // Mock for a remote signer
 fn remote_sign(keypair: &Keypair, payload: &Vec<u8>) -> Vec<u8> {
-    use k256::ecdsa::signature::hazmat::PrehashSigner;
     use k256::ecdsa::signature::Signer;
-
-    // the remote signer should support this hash natively.
-    let mut enc = TapSighash::engine();
-    enc.write_all(&payload);
-    let digest = TapSighash::from_engine(enc).as_byte_array().clone();
-
     let secret_bytes = keypair.secret_bytes();
     let schnorr_key = k256::schnorr::SigningKey::from_bytes(&secret_bytes).unwrap();
-    schnorr_key.sign_prehash(&digest).unwrap().to_bytes().to_vec()
+    schnorr_key.sign(&payload).to_bytes().to_vec()
 }
 
 /// An example of keys controlled by the transaction sender.
